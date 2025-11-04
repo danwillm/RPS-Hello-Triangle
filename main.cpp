@@ -13,7 +13,6 @@
 #include <set>
 
 #include "glm/glm.hpp"
-#include "lib/rps/src/core/rps_core.hpp"
 #include "vulkan/vulkan.h"
 
 #include "rps/rps.h"
@@ -75,7 +74,6 @@ struct CommandPool {
 struct FrameFences {
   VkFence vkfence_render_complete;
   VkSemaphore vksem_render_complete;
-  VkSemaphore vksem_image_acquired;
 };
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -287,7 +285,7 @@ class Program {
       }
 
       {  //create rps render graph
-        RpsQueueFlags queue_flags[] = {RPS_QUEUE_FLAG_GRAPHICS};
+          RpsQueueFlags queue_flags[] = {RPS_QUEUE_FLAG_GRAPHICS};
         RpsRenderGraphCreateInfo rps_render_graph_create_info = {
             .scheduleInfo =
                 {
@@ -456,15 +454,15 @@ class Program {
         };
 
         mv_frame_fences.resize(m_swapchain_images.size());
+        mv_image_acquire_semaphores.resize(m_swapchain_images.size());
         for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
-          b_qualify_vk(
-              vkCreateSemaphore(m_vkdevice, &semaphore_create_info, nullptr, &mv_frame_fences[i].vksem_image_acquired));
-
           b_qualify_vk(
               vkCreateFence(m_vkdevice, &fence_create_info, nullptr, &mv_frame_fences[i].vkfence_render_complete));
 
           b_qualify_vk(vkCreateSemaphore(m_vkdevice, &semaphore_create_info, nullptr,
                                          &mv_frame_fences[i].vksem_render_complete));
+
+          b_qualify_vk(vkCreateSemaphore(m_vkdevice, &semaphore_create_info, nullptr, &mv_image_acquire_semaphores[i]));
         }
       }
 
@@ -601,7 +599,7 @@ class Program {
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
         .frontFace = VK_FRONT_FACE_CLOCKWISE,
         .depthBiasEnable = VK_FALSE,
         .depthBiasConstantFactor = 0.f,
@@ -679,6 +677,8 @@ class Program {
     };
 
     b_qualify_vk(vkCreateGraphicsPipelines(m_vkdevice, VK_NULL_HANDLE, 1, &pipeline_create_info, nullptr, &m_pipeline));
+
+    return true;
   }
 
   void RpsDrawTriangle(const RpsCmdCallbackContext* p_context) {
@@ -737,12 +737,12 @@ class Program {
 
       RpsConstant arg_data[] = {&back_buffer_desc};
       uint32_t un_max_queued_frames = uint32_t(m_swapchain_images.size()) + 1;
-      uint64_t un_guaranteed_completed_frame = (m_unframe_index > un_max_queued_frames)
-                                                   ? (m_unframe_index - un_max_queued_frames)
+      uint64_t un_guaranteed_completed_frame = (m_unframe_number > un_max_queued_frames)
+                                                   ? (m_unframe_number - un_max_queued_frames)
                                                    : RPS_GPU_COMPLETED_FRAME_INDEX_NONE;
 
       RpsRenderGraphUpdateInfo render_graph_update_info = {
-          .frameIndex = m_unframe_index,
+          .frameIndex = m_unframe_number,
           .gpuCompletedFrameIndex = un_guaranteed_completed_frame,
           .scheduleFlags = 0,
           .diagnosticFlags = RPS_DIAGNOSTIC_ENABLE_RUNTIME_DEBUG_NAMES,
@@ -759,7 +759,7 @@ class Program {
 
     uint32_t un_swapchain_semaphore_image_index = mun_backbuffer_index;
     v_qualify_vk(vkAcquireNextImageKHR(m_vkdevice, m_vkswapchain, UINT64_MAX,
-                                       mv_frame_fences[mun_backbuffer_index].vksem_image_acquired, VK_NULL_HANDLE,
+                                       mv_image_acquire_semaphores[m_unframe_index], VK_NULL_HANDLE,
                                        &mun_backbuffer_index));
 
     vkWaitForFences(m_vkdevice, 1, &mv_frame_fences[mun_backbuffer_index].vkfence_render_complete, VK_TRUE, UINT64_MAX);
@@ -768,6 +768,46 @@ class Program {
     RpsRenderGraphBatchLayout render_graph_batch_layout;
     if (RpsResult res = rpsRenderGraphGetBatchLayout(m_rpsrendergraph, &render_graph_batch_layout)) {
       std::cout << "rpsRenderGraphGetBatchLayout failed: " << res << std::endl;
+    }
+
+    if (render_graph_batch_layout.numCmdBatches == 0) {
+      // We still must consume the acquire semaphore and produce a signal for present.
+      const VkSemaphore waitSemaphores[] = {mv_image_acquire_semaphores[m_unframe_index]};
+      const VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+      const VkSemaphore signalSemaphores[] = {mv_frame_fences[mun_backbuffer_index].vksem_render_complete};
+
+      VkSubmitInfo submitInfo{
+          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+          .pNext = nullptr,
+          .waitSemaphoreCount = 1,
+          .pWaitSemaphores = waitSemaphores,
+          .pWaitDstStageMask = waitStages,
+          .commandBufferCount = 0,  // <- dummy submit; no commands this frame
+          .pCommandBuffers = nullptr,
+          .signalSemaphoreCount = 1,
+          .pSignalSemaphores = signalSemaphores,
+      };
+
+      // Tie to the per-image fence you reset just before: this fences the no-op frame too.
+      v_qualify_vk(vkQueueSubmit(m_vkgraphics_queue, 1, &submitInfo,
+                                 mv_frame_fences[mun_backbuffer_index].vkfence_render_complete));
+
+      // Present waits on the render-finished semaphore we just signaled.
+      VkPresentInfoKHR presentInfo{
+          .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+          .pNext = nullptr,
+          .waitSemaphoreCount = 1,              // <- IMPORTANT
+          .pWaitSemaphores = signalSemaphores,  // same one we signaled
+          .swapchainCount = 1,
+          .pSwapchains = &m_vkswapchain,
+          .pImageIndices = &mun_backbuffer_index,
+          .pResults = nullptr,
+      };
+      v_qualify_vk(vkQueuePresentKHR(m_vkpresent_queue, &presentInfo));
+
+      // Advance frame index; done with this frame.
+      m_unframe_number++;
+      return;
     }
 
     {  //reserve semaphores for batches
@@ -810,7 +850,6 @@ class Program {
           cmd_pool.un_pool_index = un_command_pool_free_index;
           v_qualify_vk(vkCreateCommandPool(m_vkdevice, &ci, nullptr, &cmd_pool.resource));
 
-          // allocate from the pool you just created:
           VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
           ai.commandPool = cmd_pool.resource;
           ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -846,7 +885,7 @@ class Program {
         RpsRenderGraphRecordCommandInfo record_command_info = {
             .hCmdBuffer = rpsVKCommandBufferToHandle(record_command_buffer),
             .pUserContext = this,
-            .frameIndex = m_unframe_index,
+            .frameIndex = m_unframe_number,
             .cmdBeginIndex = batch.cmdBegin,
             .numCmds = batch.numCmds,
             .flags = 0,
@@ -864,7 +903,7 @@ class Program {
           VkSemaphore wait_semaphores[RPS_MAX_QUEUES + 1] = {};
 
           if (un_swapchain_semaphore_image_index != UINT32_MAX && b_frame_end) {
-            wait_semaphores[un_wait_semaphores++] = mv_frame_fences[un_swapchain_semaphore_image_index].vksem_image_acquired;
+            wait_semaphores[un_wait_semaphores++] = mv_image_acquire_semaphores[m_unframe_index];
             un_swapchain_semaphore_image_index = UINT32_MAX;
           }
 
@@ -913,14 +952,17 @@ class Program {
           .pSwapchains = &m_vkswapchain,
           .pImageIndices = &mun_backbuffer_index,
       };
-
+      VkSemaphore wait_semaphore;
       if (m_vksem_pending_present != VK_NULL_HANDLE) {
-        present_info.pWaitSemaphores = &m_vksem_pending_present;
+        wait_semaphore = m_vksem_pending_present;
+        present_info.pWaitSemaphores = &wait_semaphore;
+        present_info.waitSemaphoreCount = 1;
         m_vksem_pending_present = VK_NULL_HANDLE;
       }
       v_qualify_vk(vkQueuePresentKHR(m_vkpresent_queue, &present_info));
 
-      m_unframe_index++;
+      m_unframe_number++;
+      m_unframe_index = (m_unframe_index + 1) % m_swapchain_images.size();
     }
   }
 
@@ -983,9 +1025,12 @@ class Program {
 
   std::vector<FrameFences> mv_frame_fences;
   std::vector<VkSemaphore> mv_queue_semaphores;
+  std::vector<VkSemaphore> mv_image_acquire_semaphores;
   VkSemaphore m_vksem_pending_present = VK_NULL_HANDLE;
 
-  uint64_t m_unframe_index = 0;
+  uint64_t m_unframe_number = 0;
+  uint32_t m_unframe_index = 0;
+
   uint32_t mun_backbuffer_index = 0;
 
   PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT;
