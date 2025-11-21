@@ -1,3 +1,3 @@
-# Vulkan-Hello-Triangle-Minimal
+# Render Pipeline Shaders Triangle
 
-A one class, two method (Init and Tick) implementation of rendering a triangle with Vulkan.
+Simple application to demonstrate render pipeline shaders by rendering a triangle with one render graph node.
