@@ -88,7 +88,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityF
 
 class Program {
  public:
-  Program(GLFWwindow* glfw_window) : m_glfw_window(glfw_window) {};
+  Program(GLFWwindow* glfw_window) : m_glfw_window(glfw_window){};
 
   bool Init() {
     {  //Vulkan instance initialization
@@ -129,7 +129,7 @@ class Program {
             .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
             .pEngineName = "danwillm",
             .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-            .apiVersion = VK_API_VERSION_1_1,
+            .apiVersion = VK_API_VERSION_1_3,
         };
 
         uint32_t un_glfw_extension_count = 0;
@@ -241,9 +241,15 @@ class Program {
         };
 
         VkPhysicalDeviceFeatures deviceFeatures{};
+        VkPhysicalDeviceVulkan13Features features13 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            .pNext = nullptr,
+            .dynamicRendering = VK_TRUE,
+        };
+
         VkDeviceCreateInfo device_create_info = {
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = nullptr,
+            .pNext = &features13,
             .flags = 0,
             .queueCreateInfoCount = (uint32_t)v_queue_create_infos.size(),
             .pQueueCreateInfos = v_queue_create_infos.data(),
@@ -275,7 +281,7 @@ class Program {
             .pRuntimeCreateInfo = &rps_runtime_device_create_info,
             .hVkDevice = m_vkdevice,
             .hVkPhysicalDevice = m_vkphysical_device,
-            .flags = 0,
+            .flags = RPS_VK_RUNTIME_FLAG_DONT_FLIP_VIEWPORT,
             .pVkFunctions = nullptr,
         };
         if (RpsResult res = rpsVKRuntimeDeviceCreate(&rps_vk_runtime_device_create_info, &m_rpsdevice)) {
@@ -285,7 +291,7 @@ class Program {
       }
 
       {  //create rps render graph
-          RpsQueueFlags queue_flags[] = {RPS_QUEUE_FLAG_GRAPHICS};
+        RpsQueueFlags queue_flags[] = {RPS_QUEUE_FLAG_GRAPHICS};
         RpsRenderGraphCreateInfo rps_render_graph_create_info = {
             .scheduleInfo =
                 {
@@ -470,7 +476,7 @@ class Program {
     }
   }
 
-  bool CreatePipeline(VkRenderPass render_pass) {
+  bool CreatePipeline() {
     auto ReadFile = [&](const std::string& filename) -> std::vector<char> {
       std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
@@ -654,9 +660,21 @@ class Program {
 
     b_qualify_vk(vkCreatePipelineLayout(m_vkdevice, &pipeline_layout_create_info, nullptr, &m_pipeline_layout));
 
+    VkFormat colorFormats[] = {m_swapchain_format.format};
+
+    VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .pNext = nullptr,
+        .viewMask = 0,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = colorFormats,
+        .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = &pipeline_rendering_create_info,
         .flags = 0,
         .stageCount = 2,
         .pStages = shader_stage_create_infos,
@@ -670,43 +688,42 @@ class Program {
         .pColorBlendState = &color_blend_state_create_info,
         .pDynamicState = &dynamic_state_create_info,
         .layout = m_pipeline_layout,
-        .renderPass = render_pass,
+
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
+
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1,
     };
 
     b_qualify_vk(vkCreateGraphicsPipelines(m_vkdevice, VK_NULL_HANDLE, 1, &pipeline_create_info, nullptr, &m_pipeline));
+    return true;
 
     return true;
   }
 
   void RpsDrawTriangle(const RpsCmdCallbackContext* p_context) {
     if (m_pipeline == VK_NULL_HANDLE) {
-      VkRenderPass render_pass;
-      rpsVKGetCmdRenderPass(p_context, &render_pass);
-      CreatePipeline(render_pass);
+      CreatePipeline();
     }
 
     VkCommandBuffer command_buffer = rpsVKCommandBufferFromHandle(p_context->hCommandBuffer);
 
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
-    VkViewport viewport = {
-        .x = 0.f,
-        .y = 0.f,
-        .width = static_cast<float>(m_swapchain_extent.width),
-        .height = static_cast<float>(m_swapchain_extent.height),
-        .minDepth = 0.f,
-        .maxDepth = 1.f,
-    };
-    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    VkViewport vp{};
+    vp.x = 0.0f;
+    vp.y = (float)m_swapchain_extent.height;
+    vp.width = (float)m_swapchain_extent.width;
+    vp.height = -(float)m_swapchain_extent.height;
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(command_buffer, 0, 1, &vp);
 
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = m_swapchain_extent,
-    };
-    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    VkRect2D sc{};
+    sc.offset = {0, 0};
+    sc.extent = m_swapchain_extent;
+    vkCmdSetScissor(command_buffer, 0, 1, &sc);
 
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
   }
@@ -857,6 +874,8 @@ class Program {
           v_qualify_vk(vkAllocateCommandBuffers(m_vkdevice, &ai, &cmd_pool.command_buffer));
 
           mv_command_pools[mun_backbuffer_index].emplace_back(cmd_pool);
+
+          std::cout << "allocate cmd" << std::endl;
         }
 
         p_use_command_pool = &mv_command_pools[mun_backbuffer_index][un_command_pool_free_index];
@@ -981,6 +1000,38 @@ class Program {
     for (auto image_view : m_swapchain_image_views) {
       vkDestroyImageView(m_vkdevice, image_view, nullptr);
     }
+
+    rpsRenderGraphDestroy(m_rpsrendergraph);
+    rpsDeviceDestroy(m_rpsdevice);
+
+    int frames = 0;
+    int pools = 0;
+    for (auto& frame_pools : mv_command_pools) {
+      for (auto& pool : frame_pools) {
+        vkFreeCommandBuffers(m_vkdevice, pool.resource, 1, &pool.command_buffer);
+        vkDestroyCommandPool(m_vkdevice, pool.resource, nullptr);
+        pools++;
+      }
+
+      frames++;
+    }
+
+    std::cout << "Cmds: " << pools << " frames: " << frames << std::endl;
+
+    for (auto& fence : mv_frame_fences) {
+      vkDestroyFence(m_vkdevice, fence.vkfence_render_complete, nullptr);
+      vkDestroySemaphore(m_vkdevice, fence.vksem_render_complete, nullptr);
+    }
+
+    for(auto& sem : mv_queue_semaphores) {
+      vkDestroySemaphore(m_vkdevice, sem, nullptr);
+    }
+
+    for(auto& sem : mv_image_acquire_semaphores) {
+      vkDestroySemaphore(m_vkdevice, sem, nullptr);
+    }
+
+    vkDestroySemaphore(m_vkdevice, m_vksem_pending_present, nullptr);
 
     vkDestroySwapchainKHR(m_vkdevice, m_vkswapchain, nullptr);
     vkDestroyDevice(m_vkdevice, nullptr);

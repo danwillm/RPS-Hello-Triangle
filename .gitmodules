@@ -6,4 +6,4 @@
 	url = https://github.com/g-truc/glm
 [submodule "lib/rps"]
 	path = lib/rps
-	url = https://github.com/GPUOpen-LibrariesAndSDKs/RenderPipelineShaders
+	url = https://github.com/danwillm/RenderPipelineShaders
