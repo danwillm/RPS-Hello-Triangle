@@ -711,20 +711,6 @@ class Program {
 
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
-    VkViewport vp{};
-    vp.x = 0.0f;
-    vp.y = (float)m_swapchain_extent.height;
-    vp.width = (float)m_swapchain_extent.width;
-    vp.height = -(float)m_swapchain_extent.height;
-    vp.minDepth = 0.0f;
-    vp.maxDepth = 1.0f;
-    vkCmdSetViewport(command_buffer, 0, 1, &vp);
-
-    VkRect2D sc{};
-    sc.offset = {0, 0};
-    sc.extent = m_swapchain_extent;
-    vkCmdSetScissor(command_buffer, 0, 1, &sc);
-
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
   }
 
